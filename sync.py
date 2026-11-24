@@ -11,6 +11,7 @@ import base64
 import hashlib
 import os
 import re
+import subprocess
 import sys
 import time
 
@@ -169,22 +170,34 @@ def main():
         log("  附件已在，不重传")
     else:
         # Gitee 的 release 响应里没有 upload_url（那是 GitHub 的格式），
-        # 附件要用 release id 拼地址；token 同时放 query 和 form，哪种认都行。
-        url = (f"{API}/repos/{OWNER}/{REPO}/releases/{rel['id']}/attach_files"
-               f"?access_token={TOKEN}")
+        # 附件要用 release id 拼地址。
+        # 用 curl 而不是 requests：从 GitHub 机房往境内传 12 MB 是跨境上行，
+        # 带宽很窄，requests 的写超时撑不住。curl 可以容忍低速长时间传。
+        url = f"{API}/repos/{OWNER}/{REPO}/releases/{rel['id']}/attach_files"
+        tmp = "/tmp/" + ASSET
+        with open(tmp, "wb") as f:
+            f.write(blob)
         log(f"  上传 {len(blob)} 字节 -> release {rel['id']}")
         t0 = time.time()
-        try:
-            r = requests.post(url,
-                              data={"access_token": TOKEN},
-                              files={"file": (ASSET, blob)},
-                              timeout=(10, 90))
-        except requests.RequestException as e:
-            log(f"!! 上传异常 {type(e).__name__}: {e}（{time.time()-t0:.0f}s）")
-            return 1
-        log(f"  响应 {r.status_code}，用时 {time.time()-t0:.1f}s")
-        if r.status_code >= 400:
-            log(f"!! {r.text[:400]}")
+        p = subprocess.run(
+            ["curl", "-sS", "--connect-timeout", "20",
+             "--max-time", "900",
+             "--speed-limit", "1024", "--speed-time", "120",
+             "-w", "\nHTTP %{http_code} sent=%{size_upload} speed=%{speed_upload}B/s time=%{time_total}s",
+             "-F", f"access_token={TOKEN}",
+             "-F", f"file=@{tmp};filename={ASSET}",
+             f"{url}?access_token={TOKEN}"],
+            capture_output=True, text=True,
+        )
+        out = (p.stdout or "").strip()
+        err = (p.stderr or "").strip()
+        log(f"  curl exit={p.returncode} 用时 {time.time()-t0:.1f}s")
+        if out:
+            log(f"  {out[-300:]}")
+        if err:
+            log(f"  stderr: {err[-300:]}")
+        if p.returncode != 0 or "HTTP 2" not in out:
+            log("!! 上传附件失败")
             return 1
         log(f"  附件已上传 {len(blob)} 字节")
 
