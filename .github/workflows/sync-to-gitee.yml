@@ -25,7 +25,7 @@ concurrency:
 jobs:
   sync:
     runs-on: ubuntu-latest
-    timeout-minutes: 15    # 留足重试的余量
+    timeout-minutes: 25    # 留足两次上传尝试的余量
     steps:
       - uses: actions/checkout@v4
 
@@ -34,6 +34,20 @@ jobs:
           python-version: "3.12"
 
       - run: pip install --quiet requests
+
+      - name: Diagnose Gitee
+        env:
+          GITEE_TOKEN: ${{ secrets.GITEE_TOKEN }}
+          GITEE_OWNER: TeMaTou1145
+          GITEE_REPO: siboot-mirror
+        run: |
+          echo "::add-mask::$GITEE_TOKEN"
+          curl -sS -o /dev/null -m 20 -w "api repo:  %{http_code}  %{time_total}s  ip=%{remote_ip}\n" \
+            "https://gitee.com/api/v5/repos/$GITEE_OWNER/$GITEE_REPO" || echo "api repo: FAIL"
+          curl -sS -o /dev/null -m 20 -w "web repo:  %{http_code}  %{time_total}s  ip=%{remote_ip}\n" \
+            "https://gitee.com/$GITEE_OWNER/$GITEE_REPO" || echo "web repo: FAIL"
+          curl -sS -o /dev/null -m 20 -w "releases:  %{http_code}  %{time_total}s  ip=%{remote_ip}\n" \
+            "https://gitee.com/api/v5/repos/$GITEE_OWNER/$GITEE_REPO/releases?per_page=1" || echo "releases: FAIL"
 
       - name: Sync to Gitee
         env:
@@ -44,7 +58,7 @@ jobs:
           echo "::add-mask::$GITEE_TOKEN"
           # 失败就等 90 秒再来一次。多数失败是瞬时网络问题或 Gitee 限流，
           # 一次重试能救回绝大部分。真的挂了就等下一个整点，不会卡死。
-          python sync.py || { echo "第一次失败，90 秒后重试"; sleep 90; python sync.py; }
+          python -u sync.py || { echo "第一次失败，90 秒后重试"; sleep 90; python -u sync.py; }
 
       # GitHub 的定时任务在仓库 60 天没有任何提交后会被自动停掉。
       # 每月 1 号提交一个时间戳，让这个仓库永远不算"无活动"。
