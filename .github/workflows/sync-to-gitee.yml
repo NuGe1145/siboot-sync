@@ -25,7 +25,7 @@ concurrency:
 jobs:
   sync:
     runs-on: ubuntu-latest
-    timeout-minutes: 40    # 跨境上传可能很慢，留足余量
+    timeout-minutes: 35    # 跨境上传约 17 分钟，留余量
     steps:
       - uses: actions/checkout@v4
 
@@ -56,9 +56,9 @@ jobs:
           GITEE_REPO: siboot-mirror
         run: |
           echo "::add-mask::$GITEE_TOKEN"
-          # 失败就等 90 秒再来一次。多数失败是瞬时网络问题或 Gitee 限流，
-          # 一次重试能救回绝大部分。真的挂了就等下一个整点，不会卡死。
-          python -u sync.py || { echo "第一次失败，90 秒后重试"; sleep 90; python -u sync.py; }
+          # 一次上传要 17 分钟左右（跨境上行约 12 KB/s），重试会撞上 job 超时。
+          # 失败就等下一个整点自动再来，成本为零。
+          python -u sync.py
 
       # GitHub 的定时任务在仓库 60 天没有任何提交后会被自动停掉。
       # 每月 1 号提交一个时间戳，让这个仓库永远不算"无活动"。
