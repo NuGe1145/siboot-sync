@@ -12,6 +12,7 @@ import hashlib
 import os
 import re
 import sys
+import time
 
 import requests
 
@@ -167,16 +168,23 @@ def main():
     if ASSET in names:
         log("  附件已在，不重传")
     else:
-        # Gitee 的 release 响应里没有 upload_url 字段（那是 GitHub 的格式），
-        # 附件要用 release id 拼地址。
-        r = requests.post(
-            f"{API}/repos/{OWNER}/{REPO}/releases/{rel['id']}/attach_files",
-            data={"access_token": TOKEN},
-            files={"file": (ASSET, blob)},
-            timeout=300,
-        )
+        # Gitee 的 release 响应里没有 upload_url（那是 GitHub 的格式），
+        # 附件要用 release id 拼地址；token 同时放 query 和 form，哪种认都行。
+        url = (f"{API}/repos/{OWNER}/{REPO}/releases/{rel['id']}/attach_files"
+               f"?access_token={TOKEN}")
+        log(f"  上传 {len(blob)} 字节 -> release {rel['id']}")
+        t0 = time.time()
+        try:
+            r = requests.post(url,
+                              data={"access_token": TOKEN},
+                              files={"file": (ASSET, blob)},
+                              timeout=(10, 90))
+        except requests.RequestException as e:
+            log(f"!! 上传异常 {type(e).__name__}: {e}（{time.time()-t0:.0f}s）")
+            return 1
+        log(f"  响应 {r.status_code}，用时 {time.time()-t0:.1f}s")
         if r.status_code >= 400:
-            log(f"!! 上传附件失败 {r.status_code} {r.text[:300]}")
+            log(f"!! {r.text[:400]}")
             return 1
         log(f"  附件已上传 {len(blob)} 字节")
 
