@@ -139,14 +139,16 @@ def put_script(text, tag):
 
 
 def push_setup():
-    """setup.sh（一次性缓存 SideInstaller.ipa）跟着仓库一起发到 Gitee。"""
-    here = os.path.join(os.path.dirname(os.path.abspath(__file__)), "setup.sh")
-    if not os.path.exists(here):
-        log("  仓库里没有 setup.sh，跳过")
-        return
-    with open(here, encoding="utf-8") as f:
-        text = f.read()
-    put_file("setup.sh", text, "chore: update setup.sh")
+    """setup.sh / go.sh 跟着仓库一起发到 Gitee。"""
+    here = os.path.dirname(os.path.abspath(__file__))
+    for name in ("go.sh", "setup.sh"):
+        path = os.path.join(here, name)
+        if not os.path.exists(path):
+            log(f"  仓库里没有 {name}，跳过")
+            continue
+        with open(path, encoding="utf-8") as f:
+            text = f.read()
+        put_file(name, text, f"chore: update {name}")
 
 
 def main():
