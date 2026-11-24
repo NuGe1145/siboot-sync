@@ -32,6 +32,7 @@ https://gcore.jsdelivr.net/gh/FrizzleM/siboot@main/minis"""
 
 # SideInstaller（IPA）的镜像参数
 GH_IPA_API = "https://api.github.com/repos/FrizzleM/SideInstaller/releases/latest"
+GH_IPA_DL = "https://github.com/FrizzleM/SideInstaller/releases/latest/download/SideInstaller.ipa"
 IPA_NAME = "SideInstaller.ipa"
 IPA_TAG = "ipa"          # 固定 tag，URL 才能固定
 
@@ -196,6 +197,39 @@ def upload_asset(rel_id, path, name):
     return True
 
 
+def upstream_ipa():
+    """拿上游 SideInstaller 最新 IPA 的 (tag, size, 下载地址)。
+
+    先走 API（带上 GITHUB_TOKEN 时额度 5000/小时）；没 token 或被限流
+    （未认证只有 60/小时，Actions 共享出口 IP 基本必然超）就退回 HEAD
+    跟随重定向，从最终 URL 的 /download/v2.2.0/ 里解析版本号。
+    两条路都不通才放弃，绝不因为限流就误判成"已同步"。
+    """
+    tok = os.environ.get("GITHUB_TOKEN") or os.environ.get("GH_TOKEN") or ""
+    hdrs = {"Accept": "application/vnd.github+json"}
+    if tok:
+        hdrs["Authorization"] = f"Bearer {tok}"
+    try:
+        r = S.get(GH_IPA_API, timeout=60, headers=hdrs)
+        if r.status_code == 200:
+            rel = r.json()
+            ipa = next((a for a in (rel.get("assets") or [])
+                        if a.get("name") == IPA_NAME), None)
+            if ipa:
+                return rel.get("tag_name", ""), int(ipa["size"]), ipa["browser_download_url"]
+            log("!! 上游 release 里没有 SideInstaller.ipa 资产")
+        else:
+            log(f"  API 返回 {r.status_code}（限流），改用 HEAD 探测")
+    except Exception as e:
+        log(f"  API 异常 {type(e).__name__}，改用 HEAD 探测")
+
+    r = S.head(GH_IPA_DL, allow_redirects=True, timeout=90)
+    r.raise_for_status()
+    size = int(r.headers.get("Content-Length") or 0)
+    m = re.search(r"/download/([^/]+)/", r.url or "")
+    return (m.group(1) if m else ""), size, GH_IPA_DL
+
+
 def sync_ipa():
     """镜像 SideInstaller.ipa（经原作者授权）。
 
@@ -203,23 +237,14 @@ def sync_ipa():
     否则一行就退出，不浪费 20 分钟跨境上行。
     """
     try:
-        r = S.get(GH_IPA_API, timeout=60,
-                  headers={"Accept": "application/vnd.github+json"})
-        r.raise_for_status()
-        rel_gh = r.json()
+        ver, want_size, dl_url = upstream_ipa()
     except Exception as e:
-        log(f"!! 查上游 SideInstaller 失败：{type(e).__name__} {e}")
+        log(f"!! 探测上游 SideInstaller 失败：{type(e).__name__} {e}")
         return
 
-    ipa = next((a for a in (rel_gh.get("assets") or [])
-                if a.get("name") == IPA_NAME), None)
-    if not ipa:
-        log("!! 上游没有 SideInstaller.ipa 资产，跳过")
+    if not want_size:
+        log("!! 拿不到上游文件大小，本次跳过")
         return
-
-    ver = rel_gh.get("tag_name", "")
-    want_size = int(ipa["size"])
-    dl_url = ipa["browser_download_url"]
 
     rel = find_release(IPA_TAG)
     if rel:

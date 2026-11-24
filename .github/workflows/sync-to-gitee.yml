@@ -57,6 +57,9 @@ jobs:
           GITEE_TOKEN: ${{ secrets.GITEE_TOKEN }}
           GITEE_OWNER: TeMaTou1145
           GITEE_REPO: siboot-mirror
+          # 用来调 GitHub API 查上游版本。不带它的话未认证只有 60 次/小时，
+          # 而 Actions 共用出口 IP，几乎每次都会被限流 403。
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           echo "::add-mask::$GITEE_TOKEN"
           # 一次大文件上传要 20 分钟左右（跨境上行约 10 KB/s），重试会撞上
