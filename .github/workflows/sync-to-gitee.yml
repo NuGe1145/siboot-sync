@@ -1,0 +1,61 @@
+# 放到 GitHub 仓库里的 .github/workflows/sync-to-gitee.yml
+#
+# 作用：每小时检查 github.com/FrizzleM/siboot，有新版本就同步到 Gitee。
+# 只改两处：GITEE_OWNER / GITEE_REPO（如果你以后改名）。
+# GITEE_TOKEN 不要写在这里，放到仓库 Settings → Secrets and variables → Actions。
+
+name: sync-siboot-to-gitee
+
+on:
+  schedule:
+    # 每小时的第 7 分钟。
+    # 不写 0 是为了避开整点：GitHub 的定时任务在整点前后最拥堵，
+    # 容易排队甚至被丢弃。第 7 分钟几乎是空的，准时率高得多。
+    # 想更快就改成 "*/15 * * * *"，但每小时一次已经够用（作者约 3 天发一版）。
+    - cron: "7 * * * *"
+  workflow_dispatch:      # 想立刻同步时，来这里手动点一下
+
+permissions:
+  contents: write         # 给下面的心跳步骤用
+
+concurrency:
+  group: sync-siboot
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15    # 留足重试的余量
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - run: pip install --quiet requests
+
+      - name: Sync to Gitee
+        env:
+          GITEE_TOKEN: ${{ secrets.GITEE_TOKEN }}
+          GITEE_OWNER: TeMaTou1145
+          GITEE_REPO: siboot-mirror
+        run: |
+          echo "::add-mask::$GITEE_TOKEN"
+          # 失败就等 90 秒再来一次。多数失败是瞬时网络问题或 Gitee 限流，
+          # 一次重试能救回绝大部分。真的挂了就等下一个整点，不会卡死。
+          python sync.py || { echo "第一次失败，90 秒后重试"; sleep 90; python sync.py; }
+
+      # GitHub 的定时任务在仓库 60 天没有任何提交后会被自动停掉。
+      # 每月 1 号提交一个时间戳，让这个仓库永远不算"无活动"。
+      - name: Keepalive
+        if: github.event_name != 'workflow_dispatch'
+        run: |
+          if [ "$(date -u +%d)" = "01" ]; then
+            date -u +%FT%TZ > .heartbeat
+            git config user.name  "github-actions[bot]"
+            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+            git add .heartbeat
+            git commit -m "chore: keepalive" >/dev/null
+            git push
+          fi
