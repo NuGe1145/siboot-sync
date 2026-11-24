@@ -181,7 +181,7 @@ def main():
         t0 = time.time()
         p = subprocess.run(
             ["curl", "-sS", "--connect-timeout", "20",
-             "--max-time", "900",
+             "--max-time", "1800",
              "--speed-limit", "1024", "--speed-time", "120",
              "-w", "\nHTTP %{http_code} sent=%{size_upload} speed=%{speed_upload}B/s time=%{time_total}s",
              "-F", f"access_token={TOKEN}",
