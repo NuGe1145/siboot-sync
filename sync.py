@@ -104,12 +104,12 @@ def seed_if_empty():
         message="init: 建立默认分支")
 
 
-def put_script(text, tag):
+def put_file(name, text, message):
     # 注意：Gitee 的 contents 接口在文件不存在时可能返回 200 + []（数组），
     # 而不是 404。所以不能直接 .get()，必须先判断类型。
     cur = {}
     try:
-        got = api("GET", f"/repos/{OWNER}/{REPO}/contents/install.sh")
+        got = api("GET", f"/repos/{OWNER}/{REPO}/contents/{name}")
         if isinstance(got, dict):
             cur = got
     except requests.HTTPError:
@@ -118,23 +118,44 @@ def put_script(text, tag):
     if cur.get("sha"):
         try:
             if base64.b64decode(cur.get("content") or "").decode() == text:
-                log("  install.sh 已是最新，跳过提交")
+                log(f"  {name} 已是最新，跳过提交")
                 return
         except Exception:
             pass
-        api("PUT", f"/repos/{OWNER}/{REPO}/contents/install.sh",
+        api("PUT", f"/repos/{OWNER}/{REPO}/contents/{name}",
             content=base64.b64encode(text.encode()).decode(),
-            message=f"sync: siboot {tag}",
+            message=message,
             sha=cur["sha"])
-        log("  install.sh 已更新")
+        log(f"  {name} 已更新")
     else:
-        api("POST", f"/repos/{OWNER}/{REPO}/contents/install.sh",
+        api("POST", f"/repos/{OWNER}/{REPO}/contents/{name}",
             content=base64.b64encode(text.encode()).decode(),
-            message=f"sync: siboot {tag}")
-        log("  install.sh 已新建")
+            message=message)
+        log(f"  {name} 已新建")
+
+
+def put_script(text, tag):
+    put_file("install.sh", text, f"sync: siboot {tag}")
+
+
+def push_setup():
+    """setup.sh（一次性缓存 SideInstaller.ipa）跟着仓库一起发到 Gitee。"""
+    here = os.path.join(os.path.dirname(os.path.abspath(__file__)), "setup.sh")
+    if not os.path.exists(here):
+        log("  仓库里没有 setup.sh，跳过")
+        return
+    with open(here, encoding="utf-8") as f:
+        text = f.read()
+    put_file("setup.sh", text, "chore: update setup.sh")
 
 
 def main():
+    # 0. 附带文件先对齐：即使 siboot 版本没变，也要保证 setup.sh 在
+    try:
+        push_setup()
+    except Exception as e:
+        log(f"!! setup.sh 推送失败（不影响主流程）: {type(e).__name__} {e}")
+
     # 1. 取上游两个文件
     script = fetch(f"{UP}/install.sh")
     m_sha = re.search(r'^SHA256="([0-9a-f]{64})"', script, re.M)
