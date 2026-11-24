@@ -105,17 +105,29 @@ def seed_if_empty():
 
 
 def put_script(text, tag):
+    # 注意：Gitee 的 contents 接口在文件不存在时可能返回 200 + []（数组），
+    # 而不是 404。所以不能直接 .get()，必须先判断类型。
+    cur = {}
     try:
-        cur = api("GET", f"/repos/{OWNER}/{REPO}/contents/install.sh")
-        if base64.b64decode(cur.get("content", "")).decode() == text:
-            log("  install.sh 已是最新，跳过提交")
-            return
+        got = api("GET", f"/repos/{OWNER}/{REPO}/contents/install.sh")
+        if isinstance(got, dict):
+            cur = got
+    except requests.HTTPError:
+        cur = {}
+
+    if cur.get("sha"):
+        try:
+            if base64.b64decode(cur.get("content") or "").decode() == text:
+                log("  install.sh 已是最新，跳过提交")
+                return
+        except Exception:
+            pass
         api("PUT", f"/repos/{OWNER}/{REPO}/contents/install.sh",
             content=base64.b64encode(text.encode()).decode(),
             message=f"sync: siboot {tag}",
-            sha=cur.get("sha"))
+            sha=cur["sha"])
         log("  install.sh 已更新")
-    except requests.HTTPError:
+    else:
         api("POST", f"/repos/{OWNER}/{REPO}/contents/install.sh",
             content=base64.b64encode(text.encode()).decode(),
             message=f"sync: siboot {tag}")
