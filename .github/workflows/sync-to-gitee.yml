@@ -25,7 +25,7 @@ concurrency:
 jobs:
   sync:
     runs-on: ubuntu-latest
-    timeout-minutes: 25    # 留足两次上传尝试的余量
+    timeout-minutes: 40    # 跨境上传可能很慢，留足余量
     steps:
       - uses: actions/checkout@v4
 
