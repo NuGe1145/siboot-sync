@@ -4,8 +4,9 @@
 #   wget -qO- https://gitee.com/TeMaTou1145/siboot-mirror/raw/master/go.sh | sh
 #
 # 它做两件事，然后交给官方的 install.sh：
-#   1. 把 SideInstaller.ipa 存进 siboot 的缓存目录（全流程唯一需要 GitHub
-#      的地方，用公共加速代理取一次，之后永久不再联网）
+#   1. 把 SideInstaller.ipa 存进 siboot 的缓存目录（全流程唯一原本需要
+#      GitHub 的地方。现在优先从 Gitee 镜像取，取不到再走公共加速代理；
+#      存好之后永久不再联网）
 #   2. 下载官方 install.sh 并执行（二进制来自 Gitee 镜像，6 秒）
 #
 # 为什么要缓存 IPA：siboot 第一步会从 github.com 取 SideInstaller.ipa，
@@ -20,6 +21,9 @@ DL="$HOME/.siboot/downloads"
 IPA="$DL/SideInstaller.ipa"
 INFO="$DL/SideInstaller.json"
 GH="https://github.com/FrizzleM/SideInstaller/releases/latest/download/SideInstaller.ipa"
+# Gitee 上的固定地址：release tag 恒为 ipa，文件名恒定，换版本只换附件
+# （sync.py 会先删旧附件再传新的），所以这个 URL 永远有效。
+IPA_GITEE="https://gitee.com/TeMaTou1145/siboot-mirror/releases/download/ipa/SideInstaller.ipa"
 IPA_SIZE=11642855
 
 mb() { t=$(($1 * 10 / 1048576)); printf '%d.%d' $((t / 10)) $((t % 10)); }
@@ -66,13 +70,31 @@ say_step() { printf '\n\033[1m%s\033[0m\n' "$1"; }
 # ── 1. SideInstaller 缓存 ──────────────────────────────────────────────
 say_step "① SideInstaller（一次性，之后不再下载）"
 
-mkdir -p "$DL" || { warn "无法创建 $DL"; exit 1; }
+mkdir -p "$DL" 2> /dev/null
+
+# 自愈：~/.siboot 有时会变成"名字还占着、内容已经没了"的坏目录
+#（下载途中 App 被系统挂起，写盘写了一半）。这时候 mkdir 报
+# File exists 或 No such file，ls 又看得见，rm -rf 还删不掉。
+# 重命名只改父目录里的一条记录，不遍历目录内容，正好绕开这个坏点。
+if [ ! -d "$DL" ]; then
+  warn "缓存目录异常，自动修复中…"
+  bad="$HOME/.siboot.broken.$$"
+  mv "$HOME/.siboot" "$bad" 2> /dev/null
+  rm -rf "$bad" 2> /dev/null
+  mkdir -p "$DL" 2> /dev/null
+fi
+
+if [ ! -d "$DL" ]; then
+  warn "无法创建 $DL"
+  warn "请完全退出 Open Minis 再重新打开，然后重跑本命令"
+  exit 1
+fi
 
 if [ -s "$IPA" ] && [ -s "$INFO" ]; then
   ok "已缓存过，跳过（$(mb "$(wc -c < "$IPA")") MB）"
 else
   got=
-  for src in "https://ghfast.top/$GH" "https://gh-proxy.com/$GH" "$GH"; do
+  for src in "$IPA_GITEE" "https://ghfast.top/$GH" "https://gh-proxy.com/$GH" "$GH"; do
     host=$(printf '%s' "$src" | cut -d / -f 3)
     if [ -z "$FANCY" ]; then info "从 $host 下载（约 11 MB）…"; fi
     if fetch "$src" "$IPA.part" && [ -s "$IPA.part" ] && is_zip "$IPA.part"; then

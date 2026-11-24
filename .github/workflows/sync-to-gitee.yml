@@ -25,7 +25,10 @@ concurrency:
 jobs:
   sync:
     runs-on: ubuntu-latest
-    timeout-minutes: 35    # 跨境上传约 17 分钟，留余量
+    # siboot 二进制 12.2 MB（约 20 分钟）+ SideInstaller.ipa 11.6 MB（约 20 分钟），
+    # 两个都换版本的极端情况要 40 分钟以上，所以给到 60。
+    # 平常只有一个会动，多数运行 1 分钟内就结束。
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
 
@@ -56,8 +59,8 @@ jobs:
           GITEE_REPO: siboot-mirror
         run: |
           echo "::add-mask::$GITEE_TOKEN"
-          # 一次上传要 17 分钟左右（跨境上行约 12 KB/s），重试会撞上 job 超时。
-          # 失败就等下一个整点自动再来，成本为零。
+          # 一次大文件上传要 20 分钟左右（跨境上行约 10 KB/s），重试会撞上
+          # job 超时。失败就等下一个整点自动再来，成本为零。
           python -u sync.py
 
       # GitHub 的定时任务在仓库 60 天没有任何提交后会被自动停掉。

@@ -1,10 +1,14 @@
 #!/usr/bin/env python3
-"""把上游 FrizzleM/siboot 的 install.sh + 二进制同步到 Gitee。
+"""把上游 FrizzleM/siboot 的 install.sh + 二进制同步到 Gitee，
+并把 SideInstaller.ipa（经作者授权）也镜像过去。
 
 靠得住的三条设计：
 1. 两个文件来自同一次下载，先校验 SHA256 再上传，绝不发布自相矛盾的版本。
 2. 用二进制哈希前 8 位做 tag，天然幂等：同一版本重复运行只做必要的补全。
 3. 先建 release 传附件，最后才改 install.sh；中途失败下次能自愈，不会卡死。
+
+IPA 用的是另一套规则：tag 恒为 "ipa"，文件名恒定，换版本时先删旧附件
+再上传新的。这样 go.sh 里的下载地址可以写死，永远不用改。
 """
 
 import base64
@@ -26,6 +30,11 @@ ASSET = "siboot-aarch64"
 FALLBACK = """https://fastly.jsdelivr.net/gh/FrizzleM/siboot@main/minis
 https://gcore.jsdelivr.net/gh/FrizzleM/siboot@main/minis"""
 
+# SideInstaller（IPA）的镜像参数
+GH_IPA_API = "https://api.github.com/repos/FrizzleM/SideInstaller/releases/latest"
+IPA_NAME = "SideInstaller.ipa"
+IPA_TAG = "ipa"          # 固定 tag，URL 才能固定
+
 S = requests.Session()
 S.headers["User-Agent"] = "siboot-mirror-sync"
 
@@ -44,6 +53,8 @@ def api(method, path, **params):
     params["access_token"] = TOKEN
     if method == "GET":
         r = S.get(f"{API}{path}", params=params, timeout=90)
+    elif method == "DELETE":
+        r = S.request("DELETE", f"{API}{path}", params=params, timeout=120)
     else:
         r = S.request(method, f"{API}{path}", data=params, timeout=120)
     if r.status_code >= 400:
@@ -151,12 +162,118 @@ def push_setup():
         put_file(name, text, f"chore: update {name}")
 
 
+def upload_asset(rel_id, path, name):
+    """Gitee 的 release 响应里没有 upload_url（那是 GitHub 的格式），
+    附件要用 release id 拼地址。
+
+    用 curl 而不是 requests：从 GitHub 机房往境内传 10 MB 以上是跨境上行，
+    带宽很窄，requests 的写超时撑不住。curl 可以容忍低速长时间传。
+    """
+    url = f"{API}/repos/{OWNER}/{REPO}/releases/{rel_id}/attach_files"
+    log(f"  上传 {name} -> release {rel_id}")
+    t0 = time.time()
+    p = subprocess.run(
+        ["curl", "-sS", "--connect-timeout", "20",
+         "--max-time", "2400",
+         "--speed-limit", "1024", "--speed-time", "120",
+         "-w", "\nHTTP %{http_code} sent=%{size_upload} speed=%{speed_upload}B/s time=%{time_total}s",
+         "-F", f"access_token={TOKEN}",
+         "-F", f"file=@{path};filename={name}",
+         f"{url}?access_token={TOKEN}"],
+        capture_output=True, text=True,
+    )
+    out = (p.stdout or "").strip()
+    err = (p.stderr or "").strip()
+    log(f"  curl exit={p.returncode} 用时 {time.time() - t0:.1f}s")
+    if out:
+        log(f"  {out[-300:]}")
+    if err:
+        log(f"  stderr: {err[-300:]}")
+    if p.returncode != 0 or "HTTP 2" not in out:
+        log("!! 上传附件失败")
+        return False
+    log(f"  附件已上传 {os.path.getsize(path)} 字节")
+    return True
+
+
+def sync_ipa():
+    """镜像 SideInstaller.ipa（经原作者授权）。
+
+    只在「上游有新版」或「Gitee 上还没有」时才下载 + 上传，
+    否则一行就退出，不浪费 20 分钟跨境上行。
+    """
+    try:
+        r = S.get(GH_IPA_API, timeout=60,
+                  headers={"Accept": "application/vnd.github+json"})
+        r.raise_for_status()
+        rel_gh = r.json()
+    except Exception as e:
+        log(f"!! 查上游 SideInstaller 失败：{type(e).__name__} {e}")
+        return
+
+    ipa = next((a for a in (rel_gh.get("assets") or [])
+                if a.get("name") == IPA_NAME), None)
+    if not ipa:
+        log("!! 上游没有 SideInstaller.ipa 资产，跳过")
+        return
+
+    ver = rel_gh.get("tag_name", "")
+    want_size = int(ipa["size"])
+    dl_url = ipa["browser_download_url"]
+
+    rel = find_release(IPA_TAG)
+    if rel:
+        for a in (rel.get("assets") or []):
+            if a.get("name") == IPA_NAME and int(a.get("size") or 0) == want_size:
+                log(f"== IPA {ver}（{want_size} 字节）已同步，跳过")
+                return
+
+    log(f"== 同步 IPA {ver}：{want_size} 字节")
+    blob = fetch(dl_url, binary=True)
+    if len(blob) != want_size:
+        log(f"!! 下载不完整（{len(blob)}/{want_size}），本次跳过")
+        return
+
+    if rel is None:
+        seed_if_empty()
+        rel = api("POST", f"/repos/{OWNER}/{REPO}/releases",
+                  tag_name=IPA_TAG,
+                  name="SideInstaller（经原作者授权镜像）",
+                  body="Mirrored with the author's permission. "
+                       "Upstream: github.com/FrizzleM/SideInstaller",
+                  target_commitish=default_branch())
+        log(f"  建立 release {rel.get('id')} (tag={IPA_TAG})")
+
+    # tag 固定 → 必须先删旧附件，否则同一个 release 会堆一串同名文件，
+    # 而且 go.sh 里写死的地址会指向旧的。
+    for a in (rel.get("assets") or []):
+        if a.get("name") == IPA_NAME:
+            try:
+                api("DELETE",
+                    f"/repos/{OWNER}/{REPO}/releases/{rel['id']}/attach_files/{a['id']}")
+                log(f"  已删除旧附件 {a['id']}")
+            except Exception as e:
+                log(f"  !! 删旧附件失败（继续尝试上传）：{type(e).__name__} {e}")
+
+    tmp = "/tmp/" + IPA_NAME
+    with open(tmp, "wb") as f:
+        f.write(blob)
+    if upload_asset(rel["id"], tmp, IPA_NAME):
+        log(f"== IPA 完成 https://gitee.com/{OWNER}/{REPO}/releases/download/{IPA_TAG}/{IPA_NAME}")
+
+
 def main():
     # 0. 附带文件先对齐：即使 siboot 版本没变，也要保证 setup.sh 在
     try:
         push_setup()
     except Exception as e:
         log(f"!! setup.sh 推送失败（不影响主流程）: {type(e).__name__} {e}")
+
+    # 0.5 IPA 独立于 siboot 版本：单独对齐，失败也不拖累主线
+    try:
+        sync_ipa()
+    except Exception as e:
+        log(f"!! IPA 同步失败（不影响 siboot）: {type(e).__name__} {e}")
 
     # 1. 取上游两个文件
     script = fetch(f"{UP}/install.sh")
@@ -204,37 +321,11 @@ def main():
     if ASSET in names:
         log("  附件已在，不重传")
     else:
-        # Gitee 的 release 响应里没有 upload_url（那是 GitHub 的格式），
-        # 附件要用 release id 拼地址。
-        # 用 curl 而不是 requests：从 GitHub 机房往境内传 12 MB 是跨境上行，
-        # 带宽很窄，requests 的写超时撑不住。curl 可以容忍低速长时间传。
-        url = f"{API}/repos/{OWNER}/{REPO}/releases/{rel['id']}/attach_files"
         tmp = "/tmp/" + ASSET
         with open(tmp, "wb") as f:
             f.write(blob)
-        log(f"  上传 {len(blob)} 字节 -> release {rel['id']}")
-        t0 = time.time()
-        p = subprocess.run(
-            ["curl", "-sS", "--connect-timeout", "20",
-             "--max-time", "1800",
-             "--speed-limit", "1024", "--speed-time", "120",
-             "-w", "\nHTTP %{http_code} sent=%{size_upload} speed=%{speed_upload}B/s time=%{time_total}s",
-             "-F", f"access_token={TOKEN}",
-             "-F", f"file=@{tmp};filename={ASSET}",
-             f"{url}?access_token={TOKEN}"],
-            capture_output=True, text=True,
-        )
-        out = (p.stdout or "").strip()
-        err = (p.stderr or "").strip()
-        log(f"  curl exit={p.returncode} 用时 {time.time()-t0:.1f}s")
-        if out:
-            log(f"  {out[-300:]}")
-        if err:
-            log(f"  stderr: {err[-300:]}")
-        if p.returncode != 0 or "HTTP 2" not in out:
-            log("!! 上传附件失败")
+        if not upload_asset(rel["id"], tmp, ASSET):
             return 1
-        log(f"  附件已上传 {len(blob)} 字节")
 
     # 5. 改写 install.sh
     new_script = re.sub(
