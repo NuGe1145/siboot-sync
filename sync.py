@@ -167,10 +167,14 @@ def main():
     if ASSET in names:
         log("  附件已在，不重传")
     else:
-        r = requests.post(rel["upload_url"],
-                          data={"access_token": TOKEN},
-                          files={"file": (ASSET, blob)},
-                          timeout=300)
+        # Gitee 的 release 响应里没有 upload_url 字段（那是 GitHub 的格式），
+        # 附件要用 release id 拼地址。
+        r = requests.post(
+            f"{API}/repos/{OWNER}/{REPO}/releases/{rel['id']}/attach_files",
+            data={"access_token": TOKEN},
+            files={"file": (ASSET, blob)},
+            timeout=300,
+        )
         if r.status_code >= 400:
             log(f"!! 上传附件失败 {r.status_code} {r.text[:300]}")
             return 1
