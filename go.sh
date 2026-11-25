@@ -26,6 +26,16 @@ GH="https://github.com/FrizzleM/SideInstaller/releases/latest/download/SideInsta
 IPA_GITEE="https://gitee.com/TeMaTou1145/siboot-mirror/releases/download/ipa/SideInstaller.ipa"
 IPA_SIZE=11642855
 
+# 进度条用的总大小：作者发新版时 IPA 会变大变小，写死会导致百分比算错，
+# 所以从镜像仓库的 ipa.txt 读准确值（格式：版本 字节数 sha256）。
+# 读不到就用上面的默认值 —— 只影响百分比显示，不影响下载与校验。
+_sz=$(curl -fsSL --max-time 10 "$GITEE/ipa.txt" 2> /dev/null | awk 'NR==1{print $2}')
+FRESH=
+case "$_sz" in
+  '' | *[!0-9]*) ;;
+  *) [ "$_sz" -gt 1000000 ] && IPA_SIZE=$_sz && FRESH=1 ;;
+esac
+
 mb() { t=$(($1 * 10 / 1048576)); printf '%d.%d' $((t / 10)) $((t % 10)); }
 
 # 有终端就画进度，没有就一行一行说
@@ -90,9 +100,24 @@ if [ ! -d "$DL" ]; then
   exit 1
 fi
 
+# 缓存能不能直接用，要跟镜像仓库登记的版本对一下：
+# 只有「本地有文件」且「字节数跟 ipa.txt 一致」才算命中。否则说明作者
+# 发了新版，必须重下 —— 否则老用户永远停在旧版本上。
+cached_size=$(sed -n 's/.*"size": *\([0-9]*\).*/\1/p' "$INFO" 2> /dev/null | head -1)
+need_fetch=
 if [ -s "$IPA" ] && [ -s "$INFO" ]; then
-  ok "已缓存过，跳过（$(mb "$(wc -c < "$IPA")") MB）"
+  if [ -z "$FRESH" ] || [ "$cached_size" = "$IPA_SIZE" ]; then
+    ok "已缓存过，跳过（$(mb "$(wc -c < "$IPA")") MB）"
+  else
+    warn "检测到新版，重新下载（$(mb "${cached_size:-0}") → $(mb "$IPA_SIZE") MB）"
+    rm -f "$IPA" "$INFO"
+    need_fetch=1
+  fi
 else
+  need_fetch=1
+fi
+
+if [ -n "$need_fetch" ]; then
   got=
   for src in "$IPA_GITEE" "https://ghfast.top/$GH" "https://gh-proxy.com/$GH" "$GH"; do
     host=$(printf '%s' "$src" | cut -d / -f 3)
