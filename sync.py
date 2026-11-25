@@ -230,11 +230,28 @@ def upstream_ipa():
     return (m.group(1) if m else ""), size, GH_IPA_DL
 
 
+def remote_text(name):
+    """读仓库里某个文件的文本内容，不存在返回空串。"""
+    r = S.get(f"{API}/repos/{OWNER}/{REPO}/contents/{name}",
+              params={"access_token": TOKEN}, timeout=60)
+    if r.status_code != 200:
+        return ""
+    try:
+        got = r.json()
+        if isinstance(got, dict):
+            return base64.b64decode(got.get("content") or "").decode()
+    except Exception:
+        pass
+    return ""
+
+
 def sync_ipa():
     """镜像 SideInstaller.ipa（经原作者授权）。
 
-    只在「上游有新版」或「Gitee 上还没有」时才下载 + 上传，
-    否则一行就退出，不浪费 20 分钟跨境上行。
+    Gitee 的 release 接口只返回附件名和下载地址，既没有 size 也没有附件 id，
+    所以没法比对、也没法单独删附件。这里改用仓库里一个 ipa.txt 记录
+    「版本 + 字节数 + sha256」作为已同步标记，换版时整个 release 删掉重建
+    （tag 和文件名不变，下载地址因此保持恒定）。
     """
     try:
         ver, want_size, dl_url = upstream_ipa()
@@ -246,44 +263,37 @@ def sync_ipa():
         log("!! 拿不到上游文件大小，本次跳过")
         return
 
-    rel = find_release(IPA_TAG)
-    if rel:
-        for a in (rel.get("assets") or []):
-            if a.get("name") == IPA_NAME and int(a.get("size") or 0) == want_size:
-                log(f"== IPA {ver}（{want_size} 字节）已同步，跳过")
-                return
+    marker = f"{ver} {want_size}"
+    if remote_text("ipa.txt").strip().startswith(marker):
+        log(f"== IPA {ver}（{want_size} 字节）已同步，跳过")
+        return
 
     log(f"== 同步 IPA {ver}：{want_size} 字节")
     blob = fetch(dl_url, binary=True)
     if len(blob) != want_size:
         log(f"!! 下载不完整（{len(blob)}/{want_size}），本次跳过")
         return
+    sha = hashlib.sha256(blob).hexdigest()
 
-    if rel is None:
-        seed_if_empty()
-        rel = api("POST", f"/repos/{OWNER}/{REPO}/releases",
-                  tag_name=IPA_TAG,
-                  name="SideInstaller（经原作者授权镜像）",
-                  body="Mirrored with the author's permission. "
-                       "Upstream: github.com/FrizzleM/SideInstaller",
-                  target_commitish=default_branch())
-        log(f"  建立 release {rel.get('id')} (tag={IPA_TAG})")
+    old = find_release(IPA_TAG)
+    if old:
+        api("DELETE", f"/repos/{OWNER}/{REPO}/releases/{old['id']}")
+        log(f"  已删除旧 release {old['id']}（附件无法单独删，只能整体重建）")
 
-    # tag 固定 → 必须先删旧附件，否则同一个 release 会堆一串同名文件，
-    # 而且 go.sh 里写死的地址会指向旧的。
-    for a in (rel.get("assets") or []):
-        if a.get("name") == IPA_NAME:
-            try:
-                api("DELETE",
-                    f"/repos/{OWNER}/{REPO}/releases/{rel['id']}/attach_files/{a['id']}")
-                log(f"  已删除旧附件 {a['id']}")
-            except Exception as e:
-                log(f"  !! 删旧附件失败（继续尝试上传）：{type(e).__name__} {e}")
+    seed_if_empty()
+    rel = api("POST", f"/repos/{OWNER}/{REPO}/releases",
+              tag_name=IPA_TAG,
+              name="SideInstaller（经原作者授权镜像）",
+              body="Mirrored with the author's permission. "
+                   "Upstream: github.com/FrizzleM/SideInstaller",
+              target_commitish=default_branch())
+    log(f"  重建 release {rel.get('id')} (tag={IPA_TAG})")
 
     tmp = "/tmp/" + IPA_NAME
     with open(tmp, "wb") as f:
         f.write(blob)
     if upload_asset(rel["id"], tmp, IPA_NAME):
+        put_file("ipa.txt", f"{ver} {want_size} {sha}\n", f"sync: ipa {ver}")
         log(f"== IPA 完成 https://gitee.com/{OWNER}/{REPO}/releases/download/{IPA_TAG}/{IPA_NAME}")
 
 
