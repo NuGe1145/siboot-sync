@@ -28,7 +28,12 @@ API = "https://gitee.com/api/v5"
 UP = "https://raw.githubusercontent.com/FrizzleM/siboot/main/minis"
 ASSET = "siboot-aarch64"
 FALLBACK = """https://fastly.jsdelivr.net/gh/FrizzleM/siboot@main/minis
-https://gcore.jsdelivr.net/gh/FrizzleM/siboot@main/minis"""
+https://gcore.jsdelivr.net/gh/FrizzleM/siboot@main/minis
+https://cdn.jsdelivr.net/gh/FrizzleM/siboot@main/minis"""
+
+# rootshell 配对用的 wasm（2025-11 月新流程图里的第一步）
+WASM_PATH = "siboot-pair.wasm"
+WASM_URL = "https://raw.githubusercontent.com/FrizzleM/siboot/main/rootshell/bin/siboot-pair.wasm"
 
 # SideInstaller（IPA）的镜像参数
 GH_IPA_API = "https://api.github.com/repos/FrizzleM/SideInstaller/releases/latest"
@@ -148,6 +153,62 @@ def put_file(name, text, message):
 
 def put_script(text, tag):
     put_file("install.sh", text, f"sync: siboot {tag}")
+
+
+def rewrite_script(script, tag):
+    """把上游 install.sh 改成走 Gitee 的版本。
+
+    两处必改：
+    - SOURCES 指向 Gitee 的 release（原来的源国内不通）
+    - 二进制路径去掉 bin/（Gitee release 里附件是平铺的）
+    """
+    new = re.sub(
+        r'(?m)^SOURCES="[^"]*"',
+        'SOURCES="https://gitee.com/%s/%s/releases/download/%s\n%s"' % (OWNER, REPO, tag, FALLBACK),
+        script, count=1,
+    )
+    return new.replace('"$1/bin/siboot-aarch64"', '"$1/siboot-aarch64"')
+
+
+def git_blob_sha(data):
+    """Git 的 blob 哈希：Gitee contents 接口返回的 sha 就是它，
+    可以本地算出来比对，不用把文件下回来。"""
+    h = hashlib.sha1()
+    h.update(b"blob %d\x00" % len(data))
+    h.update(data)
+    return h.hexdigest()
+
+
+def put_bytes(name, data, message):
+    """二进制文件用 contents 接口写。"""
+    cur = {}
+    try:
+        got = api("GET", f"/repos/{OWNER}/{REPO}/contents/{name}")
+        if isinstance(got, dict):
+            cur = got
+    except requests.HTTPError:
+        cur = {}
+
+    if cur.get("sha") == git_blob_sha(data):
+        log(f"  {name} 已是最新，跳过提交")
+        return
+    body = {"content": base64.b64encode(data).decode(), "message": message}
+    if cur.get("sha"):
+        body["sha"] = cur["sha"]
+        api("PUT", f"/repos/{OWNER}/{REPO}/contents/{name}", **body)
+        log(f"  {name} 已更新")
+    else:
+        api("POST", f"/repos/{OWNER}/{REPO}/contents/{name}", **body)
+        log(f"  {name} 已新建")
+
+
+def sync_wasm():
+    """镜像 rootshell 配对用的 siboot-pair.wasm（约 507 KB）。"""
+    blob = fetch(WASM_URL, binary=True)
+    if len(blob) < 10000 or not blob.startswith(b"\x00asm"):
+        log(f"!! wasm 内容异常（{len(blob)} 字节），跳过")
+        return
+    put_bytes(WASM_PATH, blob, "mirror: siboot-pair.wasm（rootshell 配对用）")
 
 
 def push_setup():
@@ -310,6 +371,12 @@ def main():
     except Exception as e:
         log(f"!! IPA 同步失败（不影响 siboot）: {type(e).__name__} {e}")
 
+    # 0.6 rootshell 配对用的 wasm，同样是独立资源
+    try:
+        sync_wasm()
+    except Exception as e:
+        log(f"!! wasm 镜像失败（不影响主线）: {type(e).__name__} {e}")
+
     # 1. 取上游两个文件
     script = fetch(f"{UP}/install.sh")
     m_sha = re.search(r'^SHA256="([0-9a-f]{64})"', script, re.M)
@@ -325,7 +392,13 @@ def main():
     #    没变就直接退出，不下载那 12 MB。省流量，也不给 GitHub 添无谓的负担。
     rel = find_release(tag)
     if rel and f"releases/download/{tag}" in remote_script():
-        log(f"== {tag} 已同步，脚本已指向它，无需下载二进制")
+        # 二进制没变，但作者可能单独改过脚本（加备用源、改路径），也得跟上
+        want = rewrite_script(script, tag)
+        if want.strip() == remote_script().strip():
+            log(f"== {tag} 已同步，脚本已指向它，无需下载二进制")
+            return 0
+        put_script(want, tag)
+        log(f"== {tag} 二进制未变，但上游 install.sh 有改动，已同步脚本")
         return 0
 
     # 3. 下载并校验
@@ -363,13 +436,7 @@ def main():
             return 1
 
     # 5. 改写 install.sh
-    new_script = re.sub(
-        r'(?m)^SOURCES="[^"]*"',
-        'SOURCES="https://gitee.com/%s/%s/releases/download/%s\n%s"' % (OWNER, REPO, tag, FALLBACK),
-        script,
-        count=1,
-    )
-    new_script = new_script.replace('"$1/bin/siboot-aarch64"', '"$1/siboot-aarch64"')
+    new_script = rewrite_script(script, tag)
     if new_script == script:
         log("!! 改写未生效，SOURCES 结构可能变了，停止（避免发布指向 GitHub 的脚本）")
         return 1
